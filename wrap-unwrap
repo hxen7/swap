@@ -1,0 +1,130 @@
+from web3 import Web3
+from eth_account import Account
+import json
+import sys
+from getpass import getpass
+import time
+import secrets
+
+# Configurações iniciais
+RPC_URL = "https://base.llamarpc.com/"  # RPC da rede Base
+WETH_CONTRACT = "0x4200000000000000000000000000000000000006"
+
+# Conectar à rede Base
+web3 = Web3(Web3.HTTPProvider(RPC_URL))
+if not web3.is_connected():
+    raise Exception("Não foi possível conectar à rede Base")
+
+WETH_CONTRACT = web3.to_checksum_address(WETH_CONTRACT)
+
+# ABI mínima do WETH
+WETH_ABI = [
+    {"constant": False, "inputs": [], "name": "deposit", "outputs": [], "payable": True, "stateMutability": "payable", "type": "function"},
+    {"constant": False, "inputs": [{"internalType": "uint256", "name": "wad", "type": "uint256"}], "name": "withdraw", "outputs": [], "payable": False, "stateMutability": "nonpayable", "type": "function"}
+]
+
+# Criar instância do contrato
+contract = web3.eth.contract(address=WETH_CONTRACT, abi=WETH_ABI)
+
+# Ler e descriptografar keystore
+keystore_file = input("Digite o caminho do arquivo keystore: ")
+try:
+    with open(keystore_file, "r", encoding="utf-8") as keyfile:
+        encrypted_key = keyfile.read()
+except FileNotFoundError:
+    print(f"❌ Arquivo keystore não encontrado: {keystore_file}")
+    sys.exit(1)
+except Exception as e:
+    print(f"❌ Erro ao ler arquivo keystore: {e}")
+    sys.exit(1)
+
+password = getpass("Digite a senha do Keystore: ")
+
+print("🔐 Descriptografando Keystore...")
+try:
+    private_key = Account.decrypt(encrypted_key, password)
+    if isinstance(private_key, bytes):
+        private_key = private_key.hex()
+except ValueError:
+    print("❌ Senha incorreta ou keystore inválido.")
+    sys.exit(1)
+except Exception as e:
+    print(f"❌ Erro inesperado ao descriptografar keystore: {e}")
+    sys.exit(1)
+
+account = Account.from_key(private_key)
+print(f"🔑 Conta carregada com sucesso: {account.address}")
+
+def build_and_send_tx(function, value=0):
+    nonce = web3.eth.get_transaction_count(account.address)
+    gas_price = web3.eth.gas_price
+
+    tx = function.build_transaction({
+        'from': account.address,
+        'chainId': 8453,
+        'gas': 70000,
+        'maxFeePerGas': int(gas_price * 1.5),
+        'maxPriorityFeePerGas': int(gas_price * 0.1),
+        'nonce': nonce,
+        'value': value
+    })
+
+    signed_tx = web3.eth.account.sign_transaction(tx, private_key)
+    # Correção: usar 'raw_transaction' (snake_case) em vez de 'rawTransaction'
+    tx_hash = web3.eth.send_raw_transaction(signed_tx.raw_transaction)
+    receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+    return tx_hash.hex(), receipt
+
+def eth_to_weth(amount_wei):
+    deposit_func = contract.functions.deposit()
+    print(f"Convertendo {web3.from_wei(amount_wei, 'ether')} ETH para WETH...")
+    tx_hash, receipt = build_and_send_tx(deposit_func, value=amount_wei)
+    print(f"ETH -> WETH concluído. Hash: {tx_hash}, Bloco: {receipt.blockNumber}")
+
+def weth_to_eth(amount_wei):
+    withdraw_func = contract.functions.withdraw(amount_wei)
+    print(f"Convertendo {web3.from_wei(amount_wei, 'ether')} WETH para ETH...")
+    tx_hash, receipt = build_and_send_tx(withdraw_func)
+    print(f"WETH -> ETH concluído. Hash: {tx_hash}, Bloco: {receipt.blockNumber}")
+
+def main():
+    # Quantidade de swaps e valor
+    num_swaps = int(input("Quantos pares de swaps (ETH->WETH e WETH->ETH) deseja realizar? "))
+    amount_eth = float(input("Quantos ETH por swap? (ex: 0.005): "))
+    amount_wei = web3.to_wei(amount_eth, 'ether')
+
+    # Verificar saldo: para cada swap é necessário apenas o valor de ETH que será depositado,
+    # pois após o WETH->ETH o saldo é restituído. Opcionalmente, pode-se incluir margem para taxas.
+    balance = web3.eth.get_balance(account.address)
+    if balance < amount_wei:
+        raise Exception(f"Saldo insuficiente! Necessário: {web3.from_wei(amount_wei, 'ether')} ETH, Disponível: {web3.from_wei(balance, 'ether')} ETH")
+
+    # Executar swaps
+    for i in range(num_swaps):
+        print(f"\nExecutando par de swaps {i+1} de {num_swaps}")
+        try:
+            # ETH -> WETH
+            eth_to_weth(amount_wei)
+
+            # Delay aleatório entre 40-60 segundos
+            delay = 40 + secrets.randbelow(21)  # 40-60 segundos
+            print(f"Esperando {delay} segundos antes do swap reverso...")
+            time.sleep(delay)
+
+            # WETH -> ETH
+            weth_to_eth(amount_wei)
+
+            if i < num_swaps - 1:  # Não esperar após o último par
+                delay_between = 30 + secrets.randbelow(31)  # 30-60 segundos
+                print(f"Esperando {delay_between} segundos antes do próximo par de swaps...")
+                time.sleep(delay_between)
+
+        except Exception as e:
+            print(f"Erro no swap {i+1}: {str(e)}")
+            break
+
+    print("\nTodos os swaps concluídos!")
+
+if __name__ == "__main__":
+    print(f"Saldo inicial: {web3.from_wei(web3.eth.get_balance(account.address), 'ether')} ETH")
+    main()
